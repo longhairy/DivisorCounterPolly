@@ -3,16 +3,22 @@
 using System.Data;
 using System.Diagnostics;
 using System.Net;
+using System.Reflection.Metadata.Ecma335;
 using Dapper;
 using MySqlConnector;
 using Polly;
+using Polly.CircuitBreaker;
 using RestSharp;
 
 public class Program
 {
     private static RestClient restClient = new RestClient("http://cache-service/");
-    //private static IDbConnection divisorCache = new MySqlConnection("Server=cache-db;Database=cache-database;Uid=div-cache;Pwd=C@ch3d1v;");
-    
+    private static Policy retryPolicy = Policy.Handle<Exception>()
+        .Retry(4, (exception,retryCount) =>
+        {
+            Console.WriteLine("Exception" + exception.Message);
+            Console.WriteLine("Retry number: "+retryCount);
+        });
     public static void Main()
     {
         long first = 1_000_000_000;
@@ -26,14 +32,10 @@ public class Program
         {
             var innerWatch = Stopwatch.StartNew();
             var divisorCounter = CountDivisors(i);
-            
-            // divisorCache.Execute("INSERT INTO counters (number, divisors) VALUES (@number, @divisors)", new { number = i, divisors = divisorCounter });
-            restClient.PostAsync(new RestRequest($"/cache?number={i}&divisorCounter={divisorCounter}"));
-
+            retryPolicy.Execute(()=> restClient.PostAsync(new RestRequest($"/cache?number={i}&divisorCounter={divisorCounter}")));
             innerWatch.Stop();
             Console.WriteLine("Counted " + divisorCounter + " divisors for " + i + " in " + innerWatch.ElapsedMilliseconds + "ms");
-
-            if (divisorCounter > result)
+             if (divisorCounter > result)
             {
                 numberWithMostDivisors = i;
                 result = divisorCounter;
@@ -48,51 +50,23 @@ public class Program
 
     private static int CountDivisors(long number)
     {
-        var divisorCounter = -1; //int.Parse(divisorResult);
-        // var divisorCounter = divisorCache.QueryFirstOrDefault<int>("SELECT divisors FROM counters WHERE number = @number", new { number = i });
-        var policy = Policy.Handle<Exception>()
-        .CircuitBreaker(3, TimeSpan.FromSeconds(30),
-        (exception, duration) =>
+        int divisorCounter = retryPolicy.Execute(() =>
         {
-            divisorCounter = 0;
-            Console.WriteLine("Circuit breaker tripped");
-            for (var divisor = 1; divisor <= number; divisor++)
-            {
-                //if (task?.Status == TaskStatus.RanToCompletion)
-                //{
-                //    var cachedResult = task.Result;
-                //    if (cachedResult != 0)
-                //    {
-                //        return cachedResult;
-                //    }
-
-                //    task = null;
-                //}
-
-                if (number % divisor == 0)
-                {
-                    divisorCounter++;
-                }
-            }
-            
-        },
-        () => Console.WriteLine("Circuit breaker reset"));
-
-        policy.Execute(() =>
-        {
-            Console.WriteLine("Executing operation");
-            var task = restClient.GetAsync<int>(new RestRequest("/cache?number=" + number));
-            divisorCounter = task.Result;
+            var task = restClient.GetAsync<int>(new RestRequest("/cache?number=" + number)).Result;
+            return task;
         });
 
-        //Thread.Sleep(9000);
-        //var divisorResult = task.Content.ReadAsStringAsync().Result;
-
-
-        //if (divisorCounter == 0)
-
-
-
+        if(divisorCounter != 0)
+        {
+            return divisorCounter;
+        }
+        for(var divisor =1;divisor <= number;divisor++)
+        {
+            if(number % divisor == 0)
+            {
+                divisorCounter++;
+            }
+        }
         return divisorCounter;
     }
 }
